@@ -41,6 +41,7 @@
   .span2 { grid-column: span 2; }
   .pill { font-size:11px; padding:2px 8px; border-radius:999px; background:#334155; }
   .pill.inflight { background:#b45309; } .pill.done { background:#166534; } .pill.err { background:#7f1d1d; } .pill.gone { background:#6d28d9; }
+  .pill.timeout { background:#b91c1c; } .pill.confirm { background:#0f766e; } .pill.ack { background:#52525b; }
   #toast { position:fixed; top:14px; right:16px; display:flex; flex-direction:column; gap:8px; z-index:9; }
   #toast div { background:#0b1220; border:1px solid #475569; padding:10px 14px; border-radius:8px; font-size:13px; max-width:360px; }
   #toast div.err { border-color:var(--bad); color:#fca5a5; }
@@ -50,7 +51,7 @@
 <body>
 <header>
   <h1>流量切换控制台</h1>
-  <span>旧副本排水 · 健康门控切换 · 自动回滚 · 恰好一次计数</span>
+  <span>旧副本排水 · 超时待确认 · 健康门控切换 · 自动回滚 · 恰好一次计数</span>
 </header>
 <div id="toast"></div>
 <main>
@@ -79,10 +80,19 @@
   </div>
 
   <div class="card">
+    <h2>待确认请求（网关超时，等待副本核对结局）</h2>
+    <div class="kv"><span>旧副本 old</span><b id="uc-old" style="font-size:20px">…</b></div>
+    <div class="kv"><span>新副本 new</span><b id="uc-new" style="font-size:20px">…</b></div>
+    <div class="row" style="margin-top:6px; font-size:12px; color:var(--dim)">
+      超时后客户端已收到 502，但上游可能仍在处理；未确认前持续阻止停机。
+    </div>
+  </div>
+
+  <div class="card">
     <h2>累计计数（受理 / 完成 / 失败）</h2>
     <div class="kv"><span>旧副本 old</span><b id="c-old">…</b></div>
     <div class="kv"><span>新副本 new</span><b id="c-new">…</b></div>
-    <div class="kv"><span>校验 admitted = completed+failed+in_flight</span><b id="invariant">…</b></div>
+    <div class="kv"><span>校验 admitted = completed+failed+in_flight+unconfirmed</span><b id="invariant">…</b></div>
   </div>
 
   <div class="card">
@@ -123,6 +133,16 @@
     </div>
   </div>
 
+  <div class="card span2">
+    <h2>旧副本停机受阻原因（在途 + 超时未确认）</h2>
+    <div class="log" style="max-height:200px">
+      <table>
+        <thead><tr><th>#</th><th>类型</th><th>原因</th><th>操作</th></tr></thead>
+        <tbody id="blockers"></tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="card">
     <h2>事件日志</h2>
     <div id="events" class="log"></div>
@@ -132,7 +152,7 @@
     <h2>最近请求（去向与状态）</h2>
     <div class="log" style="max-height:220px">
       <table>
-        <thead><tr><th>#</th><th>时间</th><th>去向</th><th>状态</th><th>HTTP</th><th>耗时ms</th></tr></thead>
+        <thead><tr><th>#</th><th>时间</th><th>去向</th><th>状态</th><th>HTTP</th><th>耗时ms</th><th>确认/原因</th></tr></thead>
         <tbody id="reqs"></tbody>
       </table>
     </div>
@@ -204,7 +224,9 @@ async function refresh() {
   $('active').className = 'badge ' + (s.active === 'old' ? 'b-old' : 'b-new');
   $('declared').textContent = s.declared_complete ? '是' : '否';
   $('gen').textContent = s.generation;
-  $('drained').textContent = s.old_drained ? '是' : '否（还有 ' + s.in_flight.old + ' 个在途）';
+  $('drained').textContent = (s.old_drained && (s.unconfirmed.old || 0) === 0)
+    ? '是'
+    : `否（在途 ${s.in_flight.old}，待确认 ${s.unconfirmed.old || 0}）`;
 
   $('h-old').textContent = htxt(s.health.old); $('h-dot-old').className = 'dot ' + hcls(s.health.old);
   $('h-new').textContent = htxt(s.health.new); $('h-dot-new').className = 'dot ' + hcls(s.health.new);
@@ -215,35 +237,66 @@ async function refresh() {
   $('if-new').textContent = s.in_flight.new;
   $('if-new').style.color = s.in_flight.new > 0 ? '#fbbf24' : '#4ade80';
 
+  const uc = s.unconfirmed || {old:0, new:0};
+  $('uc-old').textContent = uc.old;
+  $('uc-old').style.color = uc.old > 0 ? '#f87171' : '#4ade80';
+  $('uc-new').textContent = uc.new;
+  $('uc-new').style.color = uc.new > 0 ? '#f87171' : '#4ade80';
+
   $('c-old').textContent = `${s.admitted.old} / ${s.completed.old} / ${s.failed.old}`;
   $('c-new').textContent = `${s.admitted.new} / ${s.completed.new} / ${s.failed.new}`;
   let invOk = true;
   for (const n of ['old','new'])
-    if (s.admitted[n] !== s.completed[n] + s.failed[n] + s.in_flight[n]) invOk = false;
+    if (s.admitted[n] !== s.completed[n] + s.failed[n] + s.in_flight[n] + (s.unconfirmed[n] || 0)) invOk = false;
   $('invariant').textContent = invOk ? '✅ 成立' : '❌ 被破坏';
   $('invariant').style.color = invOk ? '#4ade80' : '#f87171';
 
   const safe = $('safe');
   if (s.safe_to_stop_old) {
     safe.className = 'ok';
-    safe.innerHTML = '✅ 旧副本可停机<small>已宣告完成，且旧副本在途请求已全部真正结束</small>';
+    safe.innerHTML = '✅ 旧副本可停机<small>已宣告完成，且旧副本在途请求已全部真正结束、超时请求均已确认</small>';
   } else {
     safe.className = 'no';
     const why = [];
     if (!s.declared_complete) why.push('尚未宣告完成（新副本失效时仍需旧副本兜底）');
     if (s.in_flight.old > 0) why.push(`旧副本还有 ${s.in_flight.old} 个已受理请求未真正结束`);
+    if ((s.unconfirmed.old || 0) > 0) why.push(`旧副本还有 ${s.unconfirmed.old} 个超时请求结局未确认`);
     safe.innerHTML = '⛔ 旧副本不可停机<small>' + (why.join('；') || '…') + '</small>';
   }
+
+  const blockers = s.old_blockers || [];
+  $('blockers').innerHTML = blockers.length === 0
+    ? '<tr><td colspan="4" style="color:var(--dim)">无受阻项</td></tr>'
+    : blockers.map(b => {
+        const kind = b.kind === 'in-flight'
+          ? '<span class="pill inflight">在途</span>'
+          : '<span class="pill timeout">超时未确认</span>';
+        const btn = b.kind === 'unconfirmed'
+          ? `<button onclick="ack(${b.id})">人工确认</button>` : '';
+        return `<tr><td>${b.id}</td><td>${kind}</td><td>${b.reason}</td><td>${btn}</td></tr>`;
+      }).join('');
 
   $('events').innerHTML = s.events.map(e => `<div><time>${e.ts}</time>${e.msg}</div>`).join('');
   $('reqs').innerHTML = s.requests.map(r => {
     let st;
     if (r.status === 'in-flight') st = '<span class="pill inflight">在途</span>';
     else if (r.status === 'done') st = '<span class="pill done">完成</span>';
+    else if (r.status === 'upstream-timeout') st = '<span class="pill timeout">网关超时待确认</span>';
+    else if (r.status === 'confirmed-done') st = '<span class="pill confirm">副本确认完成</span>';
+    else if (r.status === 'replica-restarted') st = '<span class="pill err">副本重启未确认</span>';
+    else if (r.status === 'manually-acknowledged') st = '<span class="pill ack">人工确认</span>';
     else st = `<span class="pill err">${r.status}</span>`;
     if (r.client_gone) st += ' <span class="pill gone">客户端已走</span>';
-    return `<tr><td>${r.id}</td><td>${r.ts}</td><td>${r.replica}</td><td>${st}</td><td>${r.http_status ?? ''}</td><td>${r.latency_ms ?? ''}</td></tr>`;
+    return `<tr><td>${r.id}</td><td>${r.ts}</td><td>${r.replica}</td><td>${st}</td><td>${r.http_status ?? ''}</td><td>${r.latency_ms ?? ''}</td><td style="white-space:normal">${r.confirm_reason ?? ''}</td></tr>`;
   }).join('');
+}
+
+async function ack(id) {
+  const r = await fetch(`/ops/request/${id}/ack`, {method:'POST'});
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) toast('✅ ' + (j.msg || 'ok'), 'ok');
+  else toast('⚠️ ' + (j.reason || ('HTTP ' + r.status)), 'err');
+  refresh();
 }
 
 refresh();

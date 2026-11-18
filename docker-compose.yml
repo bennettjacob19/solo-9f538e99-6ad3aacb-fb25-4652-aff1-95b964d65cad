@@ -9,7 +9,8 @@ services:
       OLD_URL: http://old-replica:8001
       NEW_URL: http://new-replica:8002
       POLL_INTERVAL: "1.0"        # 健康探测周期（秒），也是自动回滚的最大感知时延
-      UPSTREAM_TIMEOUT: "120"     # 网关调上游的超时兜底；客户端自身超时不在此列
+      UPSTREAM_TIMEOUT: "120"     # 网关调上游的超时兜底；超时后客户端收 502，请求转“待确认”继续阻止停机
+      CONFIRM_POLL_INTERVAL: "1.0" # 超时后向副本核对请求真实结局的周期（秒）
     depends_on:
       - old-replica
       - new-replica
