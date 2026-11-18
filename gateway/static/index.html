@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>流量切换控制台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --ok:#16a34a; --bad:#dc2626; --warn:#d97706; --bg:#0f172a; --card:#1e293b; --fg:#e2e8f0; --dim:#94a3b8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: ui-sans-serif, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; display:flex; align-items:baseline; gap:14px; border-bottom:1px solid #334155; }
+  header h1 { font-size:18px; margin:0; }
+  header span { color:var(--dim); font-size:12px; }
+  main { padding:16px 20px; display:grid; gap:14px; grid-template-columns: 1fr 1fr; max-width:1280px; }
+  .card { background:var(--card); border-radius:10px; padding:14px 16px; }
+  .card h2 { margin:0 0 10px; font-size:13px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .kv { display:flex; justify-content:space-between; padding:3px 0; font-size:14px; }
+  .kv b { font-variant-numeric: tabular-nums; }
+  .badge { display:inline-block; padding:3px 10px; border-radius:999px; font-weight:600; font-size:13px; }
+  .b-old { background:#1d4ed8; } .b-new { background:#7c3aed; }
+  .b-ok { background:var(--ok); color:#fff; } .b-bad { background:var(--bad); color:#fff; } .b-warn { background:var(--warn); color:#fff; }
+  .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:6px; }
+  .dot.ok { background:var(--ok);} .dot.bad { background:var(--bad);} .dot.unk { background:var(--dim);}
+  #safe { grid-column: span 2; text-align:center; padding:18px; font-size:22px; font-weight:700; border-radius:10px; }
+  #safe.ok { background:#052e16; color:#4ade80; border:1px solid #166534; }
+  #safe.no { background:#2b0a0a; color:#f87171; border:1px solid #7f1d1d; }
+  #safe small { display:block; font-size:13px; font-weight:400; color:var(--dim); margin-top:6px; }
+  button { background:#334155; color:var(--fg); border:1px solid #475569; border-radius:8px; padding:8px 14px; font-size:13px; cursor:pointer; }
+  button:hover { background:#475569; }
+  button.primary { background:#2563eb; border-color:#2563eb; }
+  button.danger { background:#b91c1c; border-color:#b91c1c; }
+  button.warn { background:#b45309; border-color:#b45309; }
+  input { background:#0f172a; border:1px solid #475569; color:var(--fg); border-radius:8px; padding:7px 10px; width:90px; font-size:13px; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th, td { text-align:left; padding:5px 8px; border-bottom:1px solid #334155; white-space:nowrap; }
+  th { color:var(--dim); font-weight:500; }
+  .log { max-height:220px; overflow:auto; font-size:12.5px; font-family:ui-monospace,monospace; }
+  .log div { padding:2.5px 0; border-bottom:1px dashed #334155; }
+  .log time { color:var(--dim); margin-right:8px; }
+  .span2 { grid-column: span 2; }
+  .pill { font-size:11px; padding:2px 8px; border-radius:999px; background:#334155; }
+  .pill.inflight { background:#b45309; } .pill.done { background:#166534; } .pill.err { background:#7f1d1d; } .pill.gone { background:#6d28d9; }
+  #toast { position:fixed; top:14px; right:16px; display:flex; flex-direction:column; gap:8px; z-index:9; }
+  #toast div { background:#0b1220; border:1px solid #475569; padding:10px 14px; border-radius:8px; font-size:13px; max-width:360px; }
+  #toast div.err { border-color:var(--bad); color:#fca5a5; }
+  #toast div.ok { border-color:var(--ok); color:#86efac; }
+</style>
+</head>
+<body>
+<header>
+  <h1>流量切换控制台</h1>
+  <span>旧副本排水 · 健康门控切换 · 自动回滚 · 恰好一次计数</span>
+</header>
+<div id="toast"></div>
+<main>
+  <div id="safe" class="no">…</div>
+
+  <div class="card">
+    <h2>切换状态</h2>
+    <div class="kv"><span>当前活动副本（新请求去向）</span><span id="active" class="badge b-old">…</span></div>
+    <div class="kv"><span>宣告完成（回滚已禁用）</span><b id="declared">…</b></div>
+    <div class="kv"><span>切换代数 generation</span><b id="gen">…</b></div>
+    <div class="kv"><span>旧副本在途已清零</span><b id="drained">…</b></div>
+  </div>
+
+  <div class="card">
+    <h2>副本健康（网关周期探测）</h2>
+    <div class="kv"><span><span id="h-dot-old" class="dot unk"></span>旧副本 old</span><b id="h-old">…</b></div>
+    <div class="kv"><span><span id="h-dot-new" class="dot unk"></span>新副本 new</span><b id="h-new">…</b></div>
+    <div class="kv"><span>网关 → old</span><b id="url-old" style="font-size:11px">…</b></div>
+    <div class="kv"><span>网关 → new</span><b id="url-new" style="font-size:11px">…</b></div>
+  </div>
+
+  <div class="card">
+    <h2>在途请求（已受理未结束）</h2>
+    <div class="kv"><span>旧副本 old</span><b id="if-old" style="font-size:20px">…</b></div>
+    <div class="kv"><span>新副本 new</span><b id="if-new" style="font-size:20px">…</b></div>
+  </div>
+
+  <div class="card">
+    <h2>累计计数（受理 / 完成 / 失败）</h2>
+    <div class="kv"><span>旧副本 old</span><b id="c-old">…</b></div>
+    <div class="kv"><span>新副本 new</span><b id="c-new">…</b></div>
+    <div class="kv"><span>校验 admitted = completed+failed+in_flight</span><b id="invariant">…</b></div>
+  </div>
+
+  <div class="card">
+    <h2>① 发送测试请求</h2>
+    <div class="row">
+      <label>延迟ms <input id="delay" type="number" value="200"></label>
+      <button onclick="sendOne()">发 1 个</button>
+      <button onclick="sendBurst()">发 10 个并发</button>
+      <button class="warn" onclick="sendSlowAbort()">慢请求 5s，1s 后客户端断开</button>
+    </div>
+    <div class="row" style="margin-top:8px; font-size:12px; color:var(--dim)">
+      断开后观察“在途请求”：上游真正结束前计数不归零 —— 客户端断连 ≠ 上游已结束。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>② 切换操作</h2>
+    <div class="row">
+      <button class="primary" onclick="act('/ops/switch')">切换到新副本</button>
+      <button class="primary" onclick="act('/ops/declare-complete')">宣告完成</button>
+      <button class="warn" onclick="act('/ops/rollback')">手动回滚</button>
+      <button class="danger" onclick="act('/ops/reset')">复位演示</button>
+    </div>
+  </div>
+
+  <div class="card span2">
+    <h2>③ 副本控制（模拟慢响应 / 健康变化）</h2>
+    <div class="row">
+      <span class="pill">old</span>
+      <button onclick="toggleHealth('old')">切换 old 健康</button>
+      <label>延迟ms <input id="delay-old" type="number" value="100"></label>
+      <button onclick="setDelay('old')">设置 old 延迟</button>
+      <span style="width:24px"></span>
+      <span class="pill">new</span>
+      <button onclick="toggleHealth('new')">切换 new 健康</button>
+      <label>延迟ms <input id="delay-new" type="number" value="100"></label>
+      <button onclick="setDelay('new')">设置 new 延迟</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>事件日志</h2>
+    <div id="events" class="log"></div>
+  </div>
+
+  <div class="card">
+    <h2>最近请求（去向与状态）</h2>
+    <div class="log" style="max-height:220px">
+      <table>
+        <thead><tr><th>#</th><th>时间</th><th>去向</th><th>状态</th><th>HTTP</th><th>耗时ms</th></tr></thead>
+        <tbody id="reqs"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let lastHealth = {old:null, new:null};
+
+function toast(msg, cls='') {
+  const d = document.createElement('div');
+  d.className = cls; d.textContent = msg;
+  $('toast').appendChild(d);
+  setTimeout(() => d.remove(), 4200);
+}
+
+async function act(path) {
+  const r = await fetch(path, {method:'POST'});
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) toast('✅ ' + (j.msg || j.reason || 'ok'), 'ok');
+  else toast('⚠️ ' + (j.reason || j.detail || ('HTTP ' + r.status)), 'err');
+  refresh();
+}
+
+function sendOne() {
+  const d = $('delay').value;
+  fetch('/api/work?delay_ms=' + d).then(r => r.json())
+    .then(j => toast(`请求完成 → 副本 ${j.replica} (#${j.request_id})`, 'ok'))
+    .catch(() => toast('请求失败', 'err'));
+  setTimeout(refresh, 50);
+}
+
+function sendBurst() {
+  const d = $('delay').value;
+  for (let i = 0; i < 10; i++)
+    fetch('/api/work?delay_ms=' + d).catch(() => {});
+  toast('已并发发出 10 个请求');
+  setTimeout(refresh, 50);
+}
+
+function sendSlowAbort() {
+  const c = new AbortController();
+  fetch('/api/work?delay_ms=5000', {signal: c.signal}).catch(() => {});
+  setTimeout(() => { c.abort(); toast('客户端已断开（1s）；上游 5s 请求仍在执行', 'err'); refresh(); }, 1000);
+  toast('慢请求已发出（5s），将在 1s 后断开客户端连接');
+  setTimeout(refresh, 50);
+}
+
+async function toggleHealth(name) {
+  const cur = lastHealth[name] !== false;   // 未知时按健康处理
+  await act(`/ops/replica/${name}/health?healthy=${!cur}`);
+}
+async function setDelay(name) {
+  const v = $(name === 'old' ? 'delay-old' : 'delay-new').value;
+  await act(`/ops/replica/${name}/delay?delay_ms=${v}`);
+}
+
+function htxt(h) { return h === null || h === undefined ? '未知' : (h ? '健康' : '失效'); }
+function hcls(h) { return h === null || h === undefined ? 'unk' : (h ? 'ok' : 'bad'); }
+
+async function refresh() {
+  let s;
+  try { s = await (await fetch('/ops/status')).json(); }
+  catch { return; }
+  lastHealth = s.health;
+
+  $('active').textContent = s.active === 'old' ? 'OLD（旧）' : 'NEW（新）';
+  $('active').className = 'badge ' + (s.active === 'old' ? 'b-old' : 'b-new');
+  $('declared').textContent = s.declared_complete ? '是' : '否';
+  $('gen').textContent = s.generation;
+  $('drained').textContent = s.old_drained ? '是' : '否（还有 ' + s.in_flight.old + ' 个在途）';
+
+  $('h-old').textContent = htxt(s.health.old); $('h-dot-old').className = 'dot ' + hcls(s.health.old);
+  $('h-new').textContent = htxt(s.health.new); $('h-dot-new').className = 'dot ' + hcls(s.health.new);
+  $('url-old').textContent = s.replicas.old; $('url-new').textContent = s.replicas.new;
+
+  $('if-old').textContent = s.in_flight.old;
+  $('if-old').style.color = s.in_flight.old > 0 ? '#fbbf24' : '#4ade80';
+  $('if-new').textContent = s.in_flight.new;
+  $('if-new').style.color = s.in_flight.new > 0 ? '#fbbf24' : '#4ade80';
+
+  $('c-old').textContent = `${s.admitted.old} / ${s.completed.old} / ${s.failed.old}`;
+  $('c-new').textContent = `${s.admitted.new} / ${s.completed.new} / ${s.failed.new}`;
+  let invOk = true;
+  for (const n of ['old','new'])
+    if (s.admitted[n] !== s.completed[n] + s.failed[n] + s.in_flight[n]) invOk = false;
+  $('invariant').textContent = invOk ? '✅ 成立' : '❌ 被破坏';
+  $('invariant').style.color = invOk ? '#4ade80' : '#f87171';
+
+  const safe = $('safe');
+  if (s.safe_to_stop_old) {
+    safe.className = 'ok';
+    safe.innerHTML = '✅ 旧副本可停机<small>已宣告完成，且旧副本在途请求已全部真正结束</small>';
+  } else {
+    safe.className = 'no';
+    const why = [];
+    if (!s.declared_complete) why.push('尚未宣告完成（新副本失效时仍需旧副本兜底）');
+    if (s.in_flight.old > 0) why.push(`旧副本还有 ${s.in_flight.old} 个已受理请求未真正结束`);
+    safe.innerHTML = '⛔ 旧副本不可停机<small>' + (why.join('；') || '…') + '</small>';
+  }
+
+  $('events').innerHTML = s.events.map(e => `<div><time>${e.ts}</time>${e.msg}</div>`).join('');
+  $('reqs').innerHTML = s.requests.map(r => {
+    let st;
+    if (r.status === 'in-flight') st = '<span class="pill inflight">在途</span>';
+    else if (r.status === 'done') st = '<span class="pill done">完成</span>';
+    else st = `<span class="pill err">${r.status}</span>`;
+    if (r.client_gone) st += ' <span class="pill gone">客户端已走</span>';
+    return `<tr><td>${r.id}</td><td>${r.ts}</td><td>${r.replica}</td><td>${st}</td><td>${r.http_status ?? ''}</td><td>${r.latency_ms ?? ''}</td></tr>`;
+  }).join('');
+}
+
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

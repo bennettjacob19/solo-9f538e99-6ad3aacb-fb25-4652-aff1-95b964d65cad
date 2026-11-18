@@ -1,0 +1,33 @@
+# 网关 + 新旧两个副本。只暴露网关 8000 端口（操作网页与 API）。
+# 副本不对外发布端口，一切经由网关：docker compose up --build 后开 http://localhost:8000
+services:
+  gateway:
+    build: ./gateway
+    ports:
+      - "8000:8000"
+    environment:
+      OLD_URL: http://old-replica:8001
+      NEW_URL: http://new-replica:8002
+      POLL_INTERVAL: "1.0"        # 健康探测周期（秒），也是自动回滚的最大感知时延
+      UPSTREAM_TIMEOUT: "120"     # 网关调上游的超时兜底；客户端自身超时不在此列
+    depends_on:
+      - old-replica
+      - new-replica
+
+  old-replica:
+    build: ./replica
+    environment:
+      REPLICA_ID: old
+      PORT: "8001"
+      DEFAULT_DELAY_MS: "100"
+    expose:
+      - "8001"
+
+  new-replica:
+    build: ./replica
+    environment:
+      REPLICA_ID: new
+      PORT: "8002"
+      DEFAULT_DELAY_MS: "100"
+    expose:
+      - "8002"
